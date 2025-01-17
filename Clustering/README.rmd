@@ -1,0 +1,259 @@
+---
+output:
+  md_document:
+    variant: markdown_github
+---
+
+# Purpose
+
+Determine the procedure for clustering JSE stock into informative clusters for security selection. 
+
+```{r}
+rm(list = ls())
+gc() 
+library(tidyverse)
+library(tidyquant)
+library(fmxdat)
+library(ggdendro)
+list.files('code/', full.names = T, recursive = T) %>% .[grepl('.R', .)] %>% as.list() %>% walk(~source(.))
+
+# load data 
+df <- readxl::read_xlsx("data/JALSH as of Apr 10 20241_vsoj2gma.xlsx") 
+
+# clean and load from yahoo finance 
+
+data <- df %>% 
+   mutate(stk = str_remove(stk, " SJ Equity")) %>% arrange(desc(mkt.cap)) %>% head(50)
+
+# to retrieve prices and volumes from yahoo finance
+stks <- data %>% 
+  select(stk) %>% 
+  # filter(industry %in% c("Materials")) %>%
+  mutate(stk = paste0(stk, ".JO")) %>% select(stk) %>% 
+  pull()
+
+# fetch 
+
+ e <- new.env()
+#
+ # get symbols from YF
+ getSymbols(stks, from=Sys.Date()-years(10), env = e)
+ 
+ closing_prices <- do.call(merge, eapply(e, Ad))
+ 
+ colnames(closing_prices) <- gsub(".Adjusted","",names(closing_prices))
+
+ # calc simple returns, monthly
+data <- closing_prices %>%
+  tbl2xts::xts_tbl() %>%  
+  arrange(date) %>% 
+  gather(ticks, px, -date) %>%
+  mutate(stk = str_remove(ticks, ".JO")) %>% 
+  select(date, stk, px)%>%
+  mutate(YM = format(date, "%y %b")) %>% 
+  group_by(stk, YM) %>% 
+  filter(date == max(date)) %>% ungroup() %>% 
+  select(-YM)
+
+  df_rets <- data %>%
+  group_by(stk) %>%
+  mutate(rets = px / lag(px) - 1) %>%
+  filter(sum(!is.na(rets)) / n() >= 0.99) %>% 
+  slice(-1) %>% 
+  ungroup() %>% 
+  select(-px)
+# 
+
+# 
+
+getSymbols("^J203.JO", src = "yahoo", from=Sys.Date()-years(10)) 
+
+bm <- J203.JO%>% 
+  tbl2xts::xts_tbl() %>% select(date, J203.JO.Close ) %>% 
+  rename(px = J203.JO.Close) %>% 
+  mutate(YM = format(date, "%y %b")) %>% 
+  group_by(YM) %>% 
+  filter(date == max(date)) %>% ungroup() %>% 
+  select(-YM)
+```
+
+```{r}
+# create relative strength and list within sectors. we caculate based on the the returns of the benchmark being the JSE top 40
+
+rs <-  data %>% spread(., stk, px)
+
+bm <- bm %>% rename("BM"= px)
+
+# get the relative strength
+calc <- rs %>% 
+  merge(., bm, by = "date") %>%  
+  mutate(across(-date, ~ . /BM)) %>% 
+  select(-BM) %>%
+  gather(share, RS, -date) %>% filter(date >= Sys.Date()-month(6))
+
+# lets arrange, get the top and bottom decile performers
+
+top_bottom_deciles <- calc %>% arrange(desc(RS)) %>% 
+  group_by(date) %>% 
+  mutate(
+    decile = ntile(RS, 10)  
+  ) %>%
+  filter(decile == 10 | decile == 1) %>%  
+  arrange(date, desc(decile)) 
+
+labelling <- top_bottom_deciles %>% select(share) %>% 
+  distinct() %>% 
+  pull()
+```
+
+
+lets do some HC , this is to find out of the highly moving stock which of those have some connected based on past correlation 
+
+we use monthly returns for this bit
+
+filter from the results of the above chunk
+```{r}
+# 
+Top_RSI <- df_rets %>%
+  # filter(stk %in% for_clustering) %>%
+  spread(stk, rets)
+
+# for safety in our return
+
+impute_missing_returns <- function(return_mat, impute_returns_method = "NONE", Seed = 1234){
+  # Make sure we have a date column called date:
+  if( !"date" %in% colnames(return_mat) ) stop("No 'date' column provided in return_mat. Try again please.")
+
+  # Note my use of 'any' below...
+  # Also note that I 'return' return_mat - which stops the function and returns return_mat. 
+  if( impute_returns_method %in% c("NONE", "None", "none") ) {
+    if( any(is.na(return_mat)) ) warning("There are missing values in the return matrix.. Consider maybe using impute_returns_method = 'Drawn_Distribution_Own' / 'Drawn_Distribution_Collective'")
+    return(return_mat)
+  }
+
+  
+  if( impute_returns_method  == "Average") {
+
+    return_mat <-
+      return_mat %>% gather(Stocks, Returns, -date) %>%
+      group_by(date) %>%
+      mutate(Avg = mean(Returns, na.rm=T)) %>%
+      mutate(Avg = coalesce(Avg, 0)) %>% # date with no returns - set avg to zero
+      ungroup() %>%
+      mutate(Returns = coalesce(Returns, Avg)) %>% select(-Avg) %>% spread(Stocks, Returns)
+
+    # That is just so much easier when tidy right? See how I gathered and spread again to give back a wide df?
+    return(return_mat)
+  } else
+
+    if( impute_returns_method  == "Drawn_Distribution_Own") {
+
+      set.seed(Seed)
+      N <- nrow(return_mat)
+      return_mat <-
+        # DIY: see what density function does
+left_join(return_mat %>% gather(Stocks, Returns, -date),
+          return_mat %>% gather(Stocks, Returns, -date) %>% group_by(Stocks) %>%
+          mutate(Dens = list(density(Returns, na.rm=T))) %>%
+          summarise(Random_Draws = list(sample(Dens[[1]]$x, N, replace = TRUE, prob=.$Dens[[1]]$y))),
+          by = "Stocks"
+) %>%  group_by(Stocks) %>% 
+  # Random draw from sample:
+  mutate(Returns = coalesce(Returns, Random_Draws[[1]][row_number()])) %>%
+  select(-Random_Draws) %>% ungroup() %>% spread(Stocks, Returns)
+return(return_mat)
+    } else
+
+      if( impute_returns_method  == "Drawn_Distribution_Collective") {
+
+        set.seed(Seed)
+        NAll <- nrow(return_mat %>% gather(Stocks, Returns, -date))
+        # DIY: see what density function does
+        return_mat <-
+          bind_cols(
+          return_mat %>% gather(Stocks, Returns, -date),
+          return_mat %>% gather(Stocks, Returns, -date) %>%
+            mutate(Dens = list(density(Returns, na.rm=T))) %>%
+            summarise(Random_Draws = list(sample(Dens[[1]]$x, NAll, replace = TRUE, prob=.$Dens[[1]]$y))) %>% 
+            unnest(Random_Draws)
+          ) %>%
+          mutate(Returns = coalesce(Returns, Random_Draws)) %>% select(-Random_Draws) %>% spread(Stocks, Returns)
+return(return_mat)
+      } else
+
+        if( impute_returns_method  == "Zero") {
+        warning("This is probably not the best idea but who am I to judge....")
+          return_mat[is.na(return_mat)] <- 0
+  return(return_mat)
+        } else
+          stop("Please provide a valid impute_returns_method method. Options include:\n'Average', 'Drawn_Distribution_Own', 'Drawn_Distribution_Collective' and 'Zero'.")
+  
+  return_mat
+  
+}
+
+# Now we will use this function as follows (after saving and sourcing it of course....):
+# Note my seed is the year, day hour and minute - so unless you do this multiple times a minute, it will always differ.
+
+options(scipen = 999) 
+
+return_mat <- impute_missing_returns(Top_RSI, impute_returns_method = "Drawn_Distribution_Collective", Seed = as.numeric(format( Sys.time(), "%Y%d%H%M"))) %>% select(-date)
+# Ledoit Wolf shrunken covariance matrix:
+Sigma <- RiskPortfolios::covEstimation(as.matrix(return_mat), control = list(type = "lw"))
+# Or, controlling for fat tails as before:
+# Sigma <- fitHeavyTail::fit_mvt(return_mat) %>% .$cov
+
+corr <- cov2cor(Sigma)
+# get the distance matrix
+distmat <- ((1 - corr) / 2)^0.5
+
+# cluster
+cluster <- cluster::agnes(dist(distmat), method = "ward")
+```
+
+Plot the results 
+
+```{r}
+devtools::source_gist("https://gist.github.com/Nicktz/bd2614f8f8a551881a1dc3c11a1e7268")
+cluster_aux()
+
+
+hcdata <- dendro_data_k(cluster, 4)
+p <- plot_ggdendro(hcdata,
+                  direction   = "lr",
+                expand.y    = 0.2)
+
+cols <- c("#a9a9a9", "#1f77b4", "#ff7f0e", "#2ca02c", "#AD3636")
+p <- plot_ggdendro(hcdata,
+direction   = "tb",
+scale.color = cols,
+label.size  = 2.5,
+branch.size = 0.5,
+expand.y    = 0.2)
+p <- p + theme_void() + expand_limits(x = c(-1, 32))
+p + labs(title = "Dendogram of Top 50 JSE Stocks", caption = "Ward distances and AGNES clustering used")
+```
+```{r}
+p <- p +
+  theme_void() +  # Removes gridlines and background
+  expand_limits(x = c(-1, 32)) +  # Adjust x-axis limits for better spacing
+  geom_text(
+    data = filter(hcdata$label, label %in% labelling),  # Filter labels for selected stocks
+    aes(x = x, y = y, label = label),
+    color = "red",       # Highlight color for specific labels
+    size = 3.5,          # Adjust label size
+    fontface = "bold"    # Make labels bold
+  ) +
+  labs(
+    title = "Dendrogram of Top 50 JSE Stocks",
+    caption = "Ward distances and AGNES clustering used"
+  )
+
+# Display the plot
+print(p)
+```
+Now we have some companies that we can investigate further. 
+
+Next lets get the betas of this compnies relative to the entire market. For portfolio construction. 
+
+We will also do a backtest to see how 
