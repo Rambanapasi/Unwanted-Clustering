@@ -20,10 +20,19 @@ list.files('code/', full.names = T, recursive = T) %>% .[grepl('.R', .)] %>% as.
 # load data 
 df <- readxl::read_xlsx("data/JALSH as of Apr 10 20241_vsoj2gma.xlsx") 
 
+# get the labels for the sectors
+
+qualititive_factors <-  df %>%select(stk, industry, mkt.cap ) %>%
+  mutate(stk = str_remove(stk, " SJ Equity")) 
+```
+
+
+```{r}
 # clean and load from yahoo finance 
 
 data <- df %>% 
-   mutate(stk = str_remove(stk, " SJ Equity")) %>% arrange(desc(mkt.cap)) %>% head(50)
+   mutate(stk = str_remove(stk, " SJ Equity")) %>%
+  arrange(desc(mkt.cap)) %>% head(40)
 
 # to retrieve prices and volumes from yahoo finance
 stks <- data %>% 
@@ -37,7 +46,7 @@ stks <- data %>%
  e <- new.env()
 #
  # get symbols from YF
- getSymbols(stks, from=Sys.Date()-years(10), env = e)
+ getSymbols(stks, from=Sys.Date()-years(2), env = e)
  
  closing_prices <- do.call(merge, eapply(e, Ad))
  
@@ -53,18 +62,115 @@ data <- closing_prices %>%
   mutate(YM = format(date, "%y %b")) %>% 
   group_by(stk, YM) %>% 
   filter(date == max(date)) %>% ungroup() %>% 
-  select(-YM)
+  select(-YM) 
 
-  df_rets <- data %>%
+df_rets <-  data %>%
   group_by(stk) %>%
-  mutate(rets = px / lag(px) - 1) %>%
-  filter(sum(!is.na(rets)) / n() >= 0.99) %>% 
-  slice(-1) %>% 
+  mutate(rets = px / lag(px) - 1) %>% 
+  select(-px) %>%  
   ungroup() %>% 
-  select(-px)
-# 
+  left_join(qualititive_factors, by = "stk")
 
-# 
+# Step 1: Calculate sector returns as a simple average
+sector_returns_simple <- df_rets %>%
+  group_by(date, industry) %>%  # Group by date and sector
+  summarize(
+    sector_ret = mean(rets, na.rm = TRUE),  # Average returns for the sector
+    .groups = "drop"
+  ) %>% arrange(desc(date))
+
+# Step 2: Calculate sector returns weighted by market cap
+sector_returns_weighted <- df_rets %>%
+  group_by(date, industry) %>%  # Group by date and sector
+  summarize(
+    sector_ret = sum(rets * mkt.cap, na.rm = TRUE) / sum(mkt.cap, na.rm = TRUE),  # Weighted average
+    .groups = "drop"
+  ) %>% arrange(desc(date))
+
+# View the results
+sector_returns_simple
+sector_returns_weighted
+
+rolling_sector_performance <- sector_returns_weighted %>%
+  arrange(industry, date) %>%  # Sort by industry and date
+  group_by(industry) %>%  # Group by sector
+  mutate(
+    rolling_3_month_perf = rollapply(
+      sector_ret,                  # The sector return column
+      width = 3,                   # Rolling window of 3 observations
+      FUN = mean,                  # Calculate the average over the window
+      align = "right",             # Align the window to the right
+      fill = NA                    # Fill missing values with NA for the first few rows
+    )
+  ) %>%
+  ungroup()
+
+
+ggplot(rolling_sector_performance, aes(x = date, y = rolling_3_month_perf, color = industry, group = industry)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Rolling 3-Month Sector Performance (Market Cap Weighted)",
+    x = "Date",
+    y = "Rolling Performance",
+    color = "Industry"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+```
+```{r}
+# Filter for data starting 6 months ago and calculate cumulative returns
+cumulative_sector_returns <- sector_returns_weighted %>%
+  filter(date >= Sys.Date() - months(6)) %>%  # Filter for dates in the last 6 months
+  group_by(industry) %>%  # Group by sector
+  arrange(date) %>%  # Ensure data is ordered by date
+  mutate(
+    cumulative_ret = cumprod(1 + sector_ret) - 1  # Calculate cumulative returns
+  ) %>%
+  ungroup()
+
+# Plot cumulative returns
+ggplot(cumulative_sector_returns, aes(x = date, y = cumulative_ret, color = industry, group = industry)) +
+  geom_line(size = 1) +  # Line plot for cumulative returns
+  labs(
+    title = "Cumulative Sector Returns (Last 6 Months)",
+    x = "Date",
+    y = "Cumulative Return",
+    color = "Industry"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  )
+```
+```{r}
+# Filter data for the last 6 months and compute statistics
+sector_stats_last_6_months <- df_rets %>%
+  filter(date >= Sys.Date() - months(6)) %>%  # Filter for the last 6 months
+  group_by(stk, industry) %>%  # Group by stock and sector
+  summarize(
+    cumulative_return = prod(1 + rets, na.rm = TRUE)-1,  # Cumulative return
+    average_return = mean(rets, na.rm = TRUE),  # Average return
+    volatility = sd(rets, na.rm = TRUE),  # Volatility (standard deviation)
+    .groups = "drop"
+  ) %>%
+  group_by(industry) %>%  # Group by sector
+  slice_max(cumulative_return, n = 2, with_ties = FALSE) %>%  # Select top stock by cumulative return
+  ungroup()
+
+# View the results
+sector_stats_last_6_months
+```
+
+
+```{r}
 
 getSymbols("^J203.JO", src = "yahoo", from=Sys.Date()-years(10)) 
 
@@ -76,6 +182,9 @@ bm <- J203.JO%>%
   filter(date == max(date)) %>% ungroup() %>% 
   select(-YM)
 ```
+
+
+which stocks have moved, is the upward move justified and those that didnt reflect it what could be the catalysts that moves them. 
 
 ```{r}
 # create relative strength and list within sectors. we caculate based on the the returns of the benchmark being the JSE top 40
@@ -89,7 +198,7 @@ calc <- rs %>%
   merge(., bm, by = "date") %>%  
   mutate(across(-date, ~ . /BM)) %>% 
   select(-BM) %>%
-  gather(share, RS, -date) %>% filter(date >= Sys.Date()-month(6))
+  gather(share, RS, -date) 
 
 # lets arrange, get the top and bottom decile performers
 
@@ -98,8 +207,8 @@ top_bottom_deciles <- calc %>% arrange(desc(RS)) %>%
   mutate(
     decile = ntile(RS, 10)  
   ) %>%
-  filter(decile == 10 | decile == 1) %>%  
-  arrange(date, desc(decile)) 
+  filter(decile == 10) %>% group_by(share) %>% filter(date == max(date)) %>% 
+  arrange(desc(decile)) 
 
 labelling <- top_bottom_deciles %>% select(share) %>% 
   distinct() %>% 
@@ -116,7 +225,7 @@ filter from the results of the above chunk
 # 
 Top_RSI <- df_rets %>%
   # filter(stk %in% for_clustering) %>%
-  spread(stk, rets)
+  spread(stk, rets) %>% slice(-1)
 
 # for safety in our return
 
@@ -224,36 +333,42 @@ p <- plot_ggdendro(hcdata,
                 expand.y    = 0.2)
 
 cols <- c("#a9a9a9", "#1f77b4", "#ff7f0e", "#2ca02c", "#AD3636")
+
 p <- plot_ggdendro(hcdata,
 direction   = "tb",
 scale.color = cols,
 label.size  = 2.5,
 branch.size = 0.5,
 expand.y    = 0.2)
+
 p <- p + theme_void() + expand_limits(x = c(-1, 32))
+
 p + labs(title = "Dendogram of Top 50 JSE Stocks", caption = "Ward distances and AGNES clustering used")
 ```
 ```{r}
+
 p <- p +
   theme_void() +  # Removes gridlines and background
-  expand_limits(x = c(-1, 32)) +  # Adjust x-axis limits for better spacing
+  expand_limits(x = c(-1, 35)) +  # Adjust x-axis limits for better spacing
   geom_text(
-    data = filter(hcdata$label, label %in% labelling),  # Filter labels for selected stocks
+    data = filter(hcdata$labels, label %in% labelling),  # Filter labels for selected stocks
     aes(x = x, y = y, label = label),
     color = "red",       # Highlight color for specific labels
     size = 3.5,          # Adjust label size
     fontface = "bold"    # Make labels bold
   ) +
   labs(
-    title = "Dendrogram of Top 50 JSE Stocks",
+    title = "Top 40 JSE Stocks",
     caption = "Ward distances and AGNES clustering used"
   )
 
 # Display the plot
 print(p)
 ```
+
+
+
+
 Now we have some companies that we can investigate further. 
 
 Next lets get the betas of this compnies relative to the entire market. For portfolio construction. 
-
-We will also do a backtest to see how 
