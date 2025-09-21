@@ -10,7 +10,7 @@ This document explains the basic principles that the investment team at Organic 
 
 # How we see the world or our thesis
 
-Its easier to anticipate movements that happen in a second or two, but as the time period gets larger, the error of forecasting becomes bigger and this is problematic. Our forecast is therefore building assets under management according to a brick by brick approach by taking small wins during a trading period repeatedly by predicting what the market next steps are going to be. 
+Its easier to anticipate movements that happen in a second or two, but as the time period gets larger, the error of forecasting becomes bigger and this is problematic. OAM aim to forecast the very short term,  therefore, adopting a brick by brick building approach by taking small wins during a trading period repeatedly by predicting what the market next steps are going to be. 
 
 Our approach is based on three aspects of markets, each building on the other. These are Auction Market theory, price action and correlations in associated markets. Auction market theory is the study of ranges in the price action of the auction process of a particular market. AMT is a framework used to analyze and interpret price movements in financial markets based on the principles of auction dynamics. It is built on the idea that financial markets function as a continuous auction where buyers and sellers negotiate prices based on supply and demand.
 
@@ -19,5 +19,33 @@ We believe that based on this interaction from buyers and sellers, ranges are de
 What is the price action and what can it infer? First, Price action is the study of price movement over time in financial markets. It focuses on analyzing **historical** prices, mainly through charts, without relying on traditional indicators. Intuitively, price action reflects the **collective** behavior of market participants—buyers and sellers—and how supply and demand dynamics shape price movement. 
 
 Having used a lot of historical inputs into our process, we have to determine what affects our main assets that we continuously trade on any given day, a coinciding indiactor or estimate that can inform wheter or not a rally may happen in the market or we should expect the ranges to remain for such a long period of time. For such, we use correlations in associated markets. Take the S&P 500, which is largely made of large cap companies. Its price action is heavily influenced buy the top companies according to market capitalization. Therefore we could use correlations and study price of these stocks on the bigger index. 
+
+# Identifying the opportunity set
+
+From a  high time frame perspective, lets do simple correlation analysis. 
+
+```{r}
+rm(list = ls())
+gc() 
+# our opportunity targets  most liquid market, these will be developed market indices and accompanying constituents. 
+# Load libraries
+library(tidyquant)
+library(quantmod)
+library(dplyr)
+
+# Define index tickers
+index_tickers <- c("^GSPC", "^NDX", "MXWO", "^STOXX50E")  # S&P 500, NASDAQ-100, MSCI World, Euro Stoxx 50
+
+# Get historical data for indices
+indices_data <- tq_get(index_tickers, from = "2010-01-01", to = Sys.Date(), get = "stock.prices")
+
+sp500_symbols <- tq_index("SP500")  # Gets tickers of S&P 500 constituents
+
+# Fetch historical stock prices for constituents
+sp500_data <- tq_get(sp500_symbols$symbol, from = "2010-01-01", to = Sys.Date(), get = "stock.prices")
+
+# View data
+head(sp500_data)
+```
 
 
